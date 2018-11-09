@@ -172,7 +172,7 @@ const uint16_t bat2_capacity = 0;
 
 #define SPort_Serial   1    // The default is Serial 1, but 3 is possible if we don't want aux port
 
-//#define Aux_Port_Enabled    // For BlueTooth or other auxilliary serial passthrough
+#define Aux_Port_Enabled    // For BlueTooth or other auxilliary serial passthrough
 
 //*** LEDS ********************************************************************************************************
 //uint16_t MavStatusLed = 13; 
@@ -225,6 +225,7 @@ uint8_t BufLedState = LOW;
 
 //#define Frs_Dummy_rssi       // For LRS testing only - force valid rssi. NOTE: If no rssi FlightDeck or other script won't connect!
 //#define Data_Streams_Enabled // Rather set SRn in Mission Planner
+#define MAVLink_Heartbeat
 
 // Debugging options below ***************************************************************************************
 //#define Mav_Debug_All
@@ -237,10 +238,10 @@ uint8_t BufLedState = LOW;
 //#define Mav_Debug_Params
 //#define Frs_Debug_Params
 //#define Frs_Debug_Payload
-//#define Mav_Debug_Rssi
+#define Mav_Debug_Rssi
 //#define Mav_Debug_RC
 //#define Frs_Debug_RC
-//#define Mav_Debug_Heartbeat
+#define Mav_Debug_Heartbeat
 //#define Frs_Debug_APStatus
 //#define Mav_Debug_SysStatus
 //#define Frs_Debug_LatLon
@@ -274,6 +275,7 @@ bool      mavGood=false;
 bool      rssiGood=false;
 
 uint32_t  hb_millis=0;
+uint32_t  hb2_millis=0;
 uint32_t  rds_millis=0;
 uint32_t  acc_millis=0;
 uint32_t  em_millis=0;
@@ -445,6 +447,15 @@ uint16_t ap_hud_throt;
 float    ap_hud_bar_alt;   
 float    ap_hud_climb;        
 
+// Message #109 RADIO_STATUS
+uint16_t rxerrors;
+uint16_t fixed;
+//uint8_t rssi;
+uint8_t remrssi;
+uint8_t txbuf;
+uint8_t noise;
+uint8_t remnoise;
+
 // Message  #125 POWER_STATUS 
 uint16_t  ap_Vcc;                 // 5V rail voltage in millivolts
 uint16_t  ap_Vservo;              // servo rail voltage in millivolts
@@ -578,6 +589,7 @@ float    fr_bar_alt;       // metres
 //0xF103
 uint32_t fr_rssi;
 
+bool last_heartbeat = true;
 
 //****************** Ring Buffers *************************
 typedef struct  {
@@ -609,6 +621,7 @@ void setup()  {
   homGood = false;     
   hb_count = 0;
   hb_millis=millis();
+  hb2_millis=millis();
   acc_millis=millis();
   rds_millis=millis();
   em_millis=millis();
@@ -668,6 +681,13 @@ void setup()  {
 // ******************************************
 // ******************************************
 void loop()  {
+
+#ifdef MAVLink_Heartbeat
+if(millis()-hb2_millis > 1000) { 
+  hb2_millis=millis();
+  SendHeartbeat();
+}
+#endif
   
 #ifdef Data_Streams_Enabled
   if(mavGood) {                      // If we have a link request data streams from MavLink every 5s
@@ -825,7 +845,7 @@ void DecodeOneMavFrame() {
             Debug.print(hb_count);
             Debug.println("");
 
-            if(hb_count >= 3) {        // If  3 heartbeats from MavLink then we are connected
+            if(hb_count >= 1) {        // If  1 heartbeats from MavLink then we are connected
               mavGood=true;
               Debug.println("mavgood=true");  
               hb_count=0;
@@ -1048,9 +1068,8 @@ void DecodeOneMavFrame() {
           ap_chan_raw[14] = mavlink_msg_rc_channels_get_chan14_raw(&msg);
           ap_chan_raw[15] = mavlink_msg_rc_channels_get_chan15_raw(&msg);   
           ap_chan_raw[16] = mavlink_msg_rc_channels_get_chan16_raw(&msg);
-          
-          ap_rssi = mavlink_msg_rc_channels_get_rssi(&msg);   // Receive RSSI 0: 0%, 254: 100%, 255: invalid/unknown
-          ap_rc_flag = true;                                  // tell fr routine we have an rc records
+          //ap_rssi = mavlink_msg_rc_channels_get_rssi(&msg);   // Receive RSSI 0: 0%, 254: 100%, 255: invalid/unknown
+          //ap_rc_flag = true;                                  // tell fr routine we have an rc records
           #if defined Mav_Debug_All || defined Mav_Debug_Rssi || defined Mav_Debug_RC
             Debug.print("Mavlink in #65 RC_Channels: ");
             Debug.print("Channel count= "); Debug.print(ap_chcnt); 
@@ -1085,7 +1104,11 @@ void DecodeOneMavFrame() {
             Debug.print("  Baro alt= "); Debug.print(ap_hud_bar_alt, 0);   // m                  
             Debug.print("  Climb rate= "); Debug.println(ap_hud_climb);               // m/s
           #endif  
-          break; 
+          break;
+/*        case MAVLINK_MSG_ID_RADIO_STATUS:
+            rssi = mavlink_msg_radio_get_rssi(&msg);
+            Debug.print("RSSI="); Debug.println(rssi);
+            break;*/
         case MAVLINK_MSG_ID_SCALED_IMU2:       // #116   http://mavlink.org/messages/common
           if (!mavGood) break;       
           break; 
@@ -1136,9 +1159,11 @@ void DecodeOneMavFrame() {
           break; 
         case MAVLINK_MSG_ID_MEMINFO:           // #152   http://mavlink.org/messages/ardupilotmega
           if (!mavGood) break;        
-          break;   
+          break;
+        case MAVLINK_MSG_ID_RADIO_STATUS:   
         case MAVLINK_MSG_ID_RADIO:             // #166   http://mavlink.org/messages/ardupilotmega
           if (!mavGood) break;
+          rssiGood=true;
           ap_rssi = mavlink_msg_radio_get_rssi(&msg);            // local signal strength
           ap_remrssi = mavlink_msg_radio_get_remrssi(&msg);      // remote signal strength
           ap_txbuf = mavlink_msg_radio_get_txbuf(&msg);          // how full the tx buffer is as a percentage
@@ -1323,6 +1348,24 @@ const uint16_t mavRates[] = { 0x04, 0x0a, 0x04, 0x0a, 0x04, 0x04 0x04};
 #endif
 
 //***************************************************
+#ifdef MAVLink_Heartbeat    
+void SendHeartbeat() {
+uint16_t len;
+const uint8_t mavSysid=0xFF;
+const uint8_t mavCompid=0xBE;
+const uint8_t mavSys = 1;
+const uint8_t mavComp = 1;
+
+    mavlink_msg_heartbeat_pack(mavSysid, mavCompid, &msg,
+        0, 0, 0, 0, 0);    // start_stop 1 to start sending, 0 to stop sending   
+  
+    len = mavlink_msg_to_send_buffer(buf, &msg);
+    mavSerial.write(buf,len);
+ Debug.println("Heartbeat");
+}
+#endif
+
+//***************************************************
 
 void Aux_ReceiveAndForward() {   // up to FC, optional
   #if defined Aux_Port_Enabled && defined auxDuplex
@@ -1337,6 +1380,12 @@ void Aux_ReceiveAndForward() {   // up to FC, optional
       #ifdef  Aux_Port_Debug
       Debug.println("auxSerial passed up to FC:");
       PrintMavBuffer(&msg);
+      #endif
+
+      #ifdef MAVLink_Heartbeat
+      if (msg.msgid == MAVLINK_MSG_ID_HEARTBEAT) {
+        hb2_millis=millis();
+      }
       #endif
       
       len = mavlink_msg_to_send_buffer(buf, &msg);
